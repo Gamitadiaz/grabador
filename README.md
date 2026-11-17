@@ -40,17 +40,35 @@ Los videos van a `~/Videos/Grabador/` (en `.mkv` por defecto: si se corta la luz
 
 `auto` usa gpu-screen-recorder si está instalado; si no, ffmpeg. Si NVENC no funciona cae a libx264.
 
-## Notas importantes sobre calidad
+## Resolución REAL sin escalado (juegos y navegador)
 
-- **Tu monitor es 1366×768**: grabar a 1080p **reescala**, no añade detalle (sirve para que el timeline del editor sea 1080p).
-  Para **1080p real**, renderiza el escritorio a 1920×1080 y que la GPU lo reduzca al panel:
-  ```bash
-  ./superres.sh 1920x1080   # luego graba con resolución "nativa"
-  ./superres.sh off
-  ```
-  (X11; usa `nvidia-settings` ViewPortIn si está disponible, si no `xrandr --scale`.) El texto se verá más pequeño en tu monitor, pero la grabación tendrá detalle real.
-- **FPS mayores al refresco del monitor** (~60 Hz) producen frames duplicados. 120/144 solo tiene sentido para juegos que rendericen más fps o para cámara lenta.
-- Calidades: `media` (CQ 26), `alta` (21), `edicion` (17), `ultra` (14). Para editar en DaVinci Resolve en Linux, considera recodificar a DNxHR o usar HEVC.
+Tu panel es 1366×768. En lugar de agrandar el video después (pierde nitidez), Grabador hace que la GPU
+**dibuje todo el escritorio a 1920×1080** y lo reduzca a tu monitor (lo mismo que DSR en Windows).
+El juego y el navegador renderizan 1080p de verdad y la grabación captura esos píxeles.
+
+```bash
+grabador superres 1920x1080      # (o botón "Activar" en la GUI, con auto-revertir en 15 s)
+grabador navegador chrome        # Chrome a escala 1.41: en tu monitor se ve de tamaño normal
+grabador grabar -r nativa -f 60  # = 1920x1080 reales
+grabador superres off            # volver a la normalidad
+```
+
+- **Navegador**: con escala 1.41 la página se ve igual de grande que siempre en tu monitor, pero se dibuja con
+  1.41× más píxeles. Chrome debe estar **totalmente cerrado** antes de abrirlo así (si no, ignora el flag).
+  Firefox: `about:config` → `layout.css.devPixelsPerPx = 1.41` (pon `-1` para quitarlo), o zoom 140 % (Ctrl +).
+  Juegos de canvas/WebGL que respetan `devicePixelRatio` (Unity WebGL, Phaser, la mayoría de .io modernos)
+  renderizan a 1080p real. Si un juego tiene un canvas de tamaño fijo, ni esto ni nada le da más detalle.
+- **Juegos nativos / Steam (Proton)**: ponlos en pantalla completa a 1920×1080.
+- **Costo**: la GPU dibuja ~2× píxeles. Para juegos de navegador la 3060 sobra; en juegos pesados perderás fps.
+- 2560×1440 → grabar en `1080p` = supersampling (más nítido aún), a cambio de más GPU.
+- Requiere **sesión X11** (en Wayland no existe este escalado; elige "Plasma (X11)" / "Xorg" en el login).
+  Usa `nvidia-settings` (ViewPortIn) si está; si no, `xrandr --scale-from`.
+
+## Otras notas
+
+- **FPS mayores al refresco del monitor** (~60 Hz) producen frames duplicados. 120/144 solo tiene sentido para
+  juegos que rendericen más fps o para cámara lenta.
+- Calidades: `media` (CQ 26), `alta` (21), `edicion` (17), `ultra` (14). Para YouTube, `alta`/`edicion` en 1080p60.
 
 ## Segundo plano
 

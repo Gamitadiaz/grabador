@@ -3,7 +3,7 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 if command -v pacman >/dev/null; then
-  sudo pacman -S --needed ffmpeg tk xdotool xorg-xwininfo xorg-xrandr slop libpulse libnotify
+  sudo pacman -S --needed ffmpeg tk xdotool xorg-xwininfo xorg-xrandr slop libpulse libnotify nvidia-settings
   echo "Opcional (recomendado): gpu-screen-recorder desde AUR ->  yay -S gpu-screen-recorder"
 fi
 chmod +x "$DIR/grabador.py" "$DIR/superres.sh"

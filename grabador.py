@@ -82,23 +82,151 @@ def nvenc_funciona(codec: str = "h264_nvenc") -> bool:
     return r.returncode == 0
 
 
+def _xrandr() -> str:
+    return run(["xrandr", "--current"]) if which("xrandr") else ""
+
+
+def salida_principal(out: str | None = None) -> dict | None:
+    """Info del monitor primario: nombre, geometría virtual (lo que se dibuja/graba),
+    modo nativo del panel y refresco."""
+    out = _xrandr() if out is None else out
+    bloques = re.split(r"^(?=\S)", out, flags=re.M)
+    conectados = [b for b in bloques if re.match(r"^\S+ connected", b)]
+    if not conectados:
+        return None
+    b = next((c for c in conectados if " connected primary" in c), conectados[0])
+    nombre = b.split()[0]
+    geo = re.search(r"(\d+)x(\d+)\+(\d+)\+(\d+)", b.splitlines()[0])
+    nativa = actual = None
+    hz = 60.0
+    for ln in b.splitlines()[1:]:
+        m = re.match(r"\s+(\d+)x(\d+)\S*\s+(.*)", ln)
+        if not m:
+            continue
+        modo = (int(m.group(1)), int(m.group(2)))
+        if "+" in m.group(3) and not nativa:
+            nativa = modo
+        r = re.search(r"(\d+\.\d+)\*", m.group(3))
+        if r:
+            actual, hz = modo, float(r.group(1))
+    if geo:
+        w, h, x, y = map(int, geo.groups())
+    else:
+        w, h, x, y = (*(actual or (1366, 768)), 0, 0)
+    # con un solo monitor, el tamaño de la "Screen 0" es la verdad (ViewPortIn / --scale)
+    scr = re.search(r"current (\d+) x (\d+)", out)
+    if scr and len(conectados) == 1:
+        w, h = int(scr.group(1)), int(scr.group(2))
+    nativa = nativa or actual or (w, h)
+    return {"nombre": nombre, "w": w, "h": h, "x": x, "y": y, "hz": hz,
+            "nativa": nativa, "supermuestreo": (w, h) != tuple(nativa)}
+
+
 def pantalla_x11() -> tuple[int, int, int, int, float]:
-    """Devuelve (w, h, x, y, refresh) del monitor primario (o del escritorio completo)."""
-    out = run(["xrandr", "--current"]) if which("xrandr") else ""
-    refresh = 60.0
-    m = re.search(r"^\S+ connected primary (\d+)x(\d+)\+(\d+)\+(\d+)", out, re.M) or \
-        re.search(r"^\S+ connected (\d+)x(\d+)\+(\d+)\+(\d+)", out, re.M)
-    r = re.search(r"(\d+\.\d+)\*", out)
-    if r:
-        refresh = float(r.group(1))
-    if m:
-        w, h, x, y = map(int, m.groups())
-        return w, h, x, y, refresh
+    """(w, h, x, y, refresh) del monitor primario, en píxeles REALES del escritorio."""
+    i = salida_principal()
+    if i:
+        return i["w"], i["h"], i["x"], i["y"], i["hz"]
     out = run(["xdpyinfo"]) if which("xdpyinfo") else ""
     m = re.search(r"dimensions:\s+(\d+)x(\d+)", out)
     if m:
-        return int(m.group(1)), int(m.group(2)), 0, 0, refresh
-    return 1366, 768, 0, 0, refresh
+        return int(m.group(1)), int(m.group(2)), 0, 0, 60.0
+    return 1366, 768, 0, 0, 60.0
+
+
+# ----------------------------------------------------------------------------- supermuestreo
+# El escritorio (juegos, navegador, todo) se DIBUJA a p.ej. 1920x1080 y la GPU lo reduce
+# a tu panel de 1366x768. La grabación captura los píxeles reales: 1080p sin escalar.
+SUPERRES_BACKUP = RUNTIME_DIR / f"{APP}-metamode.txt"
+
+
+def _nvidia_settings_ok() -> bool:
+    return which("nvidia-settings") and bool(
+        run(["nvidia-settings", "-t", "-q", "CurrentMetaMode"]).strip())
+
+
+def superres(modo: str) -> str:
+    """modo = 'WxH' para activar, 'off' para restaurar. Devuelve mensaje."""
+    if tipo_sesion() == "wayland":
+        raise RuntimeError("El supermuestreo necesita sesión X11 (en el login elige 'Xorg/X11').")
+    i = salida_principal()
+    if not i:
+        raise RuntimeError("No se detectó monitor con xrandr.")
+    out, (nw, nh) = i["nombre"], i["nativa"]
+    nativa = f"{nw}x{nh}"
+    if modo != "off" and not re.fullmatch(r"\d+x\d+", modo):
+        raise ValueError("Formato: 1920x1080")
+
+    if _nvidia_settings_ok():
+        if modo == "off":
+            mm = SUPERRES_BACKUP.read_text().strip() if SUPERRES_BACKUP.exists() \
+                else f"{out}: nvidia-auto-select +0+0"
+        else:
+            if not SUPERRES_BACKUP.exists():
+                SUPERRES_BACKUP.write_text(
+                    run(["nvidia-settings", "-t", "-q", "CurrentMetaMode"]).strip()
+                    .split("::")[-1].strip())
+            # ForceFullCompositionPipeline evita tearing al escalar
+            mm = (f"{out}: nvidia-auto-select +0+0 {{ViewPortIn={modo}, "
+                  f"ViewPortOut={nativa}+0+0, ForceFullCompositionPipeline=On}}")
+        r = subprocess.run(["nvidia-settings", "--assign", f"CurrentMetaMode={mm}"],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or "ERROR" in r.stdout + r.stderr:
+            raise RuntimeError(f"nvidia-settings falló:\n{r.stdout}{r.stderr}")
+        if modo == "off":
+            SUPERRES_BACKUP.unlink(missing_ok=True)
+    else:
+        if modo == "off":
+            cmd = ["xrandr", "--output", out, "--mode", nativa, "--scale", "1x1",
+                   "--panning", f"{nativa}"]
+        else:
+            cmd = ["xrandr", "--output", out, "--mode", nativa, "--scale-from", modo]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"xrandr falló: {r.stderr}")
+    if modo == "off":
+        return f"Escritorio restaurado a {nativa}."
+    return (f"Escritorio dibujándose a {modo} (panel {nativa}). "
+            f"Graba con resolución 'nativa' = {modo} reales.")
+
+
+NAVEGADORES_CHROMIUM = ["google-chrome-stable", "google-chrome", "chromium", "brave",
+                        "brave-browser", "vivaldi-stable", "microsoft-edge-stable"]
+
+
+def factor_escala() -> float:
+    i = salida_principal()
+    if not i:
+        return 1.0
+    return round(i["w"] / i["nativa"][0], 2)
+
+
+def lanzar_navegador(nav: str = "auto", url: str | None = None) -> str:
+    """Abre el navegador a escala = virtual/nativa: en tu monitor se ve del tamaño normal,
+    pero dibuja (y se graba) con todos los píxeles de 1080p."""
+    f = factor_escala()
+    if nav in ("auto", "chrome", "chromium"):
+        bins = [b for b in NAVEGADORES_CHROMIUM if which(b)]
+        if nav == "chromium":
+            bins = [b for b in bins if b == "chromium"] or bins
+        if bins:
+            b = bins[0]
+            if run(["pgrep", "-f", b]).strip():
+                return (f"{b} ya está abierto: ciérralo por completo y vuelve a lanzarlo desde aquí, "
+                        f"si no ignora la escala (o usa zoom {int(f * 100)}% con Ctrl +).")
+            cmd = [b, f"--force-device-scale-factor={f}"] + ([url] if url else [])
+            subprocess.Popen(cmd, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return f"{b} abierto con escala {f}."
+        if nav != "auto":
+            return "No encontré Chrome/Chromium/Brave."
+    if which("firefox"):
+        subprocess.Popen(["firefox"] + ([url] if url else []), start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return (f"Firefox abierto. Para que se vea de tamaño normal: about:config -> "
+                f"layout.css.devPixelsPerPx = {f}  (vuelve a -1 para quitarlo), "
+                f"o zoom {int(f * 100)}% con Ctrl +.")
+    return "No encontré navegador compatible."
 
 
 def seleccionar_ventana() -> str | None:
@@ -144,7 +272,7 @@ def par(n: int) -> int:
 class Config:
     motor: str = "auto"            # auto | ffmpeg | gsr
     objetivo: str = "pantalla"     # pantalla | ventana | region | enfocada
-    resolucion: str = "1080p"
+    resolucion: str = "nativa"
     fps: int = 60
     codec: str = "h264"            # h264 | hevc
     calidad: str = "alta"
@@ -185,8 +313,9 @@ def avisos(cfg: Config) -> list[str]:
                         f"(útil solo para cámara lenta/edición, no aporta fluidez real).")
         tgt = RESOLUCIONES.get(cfg.resolucion)
         if tgt and (tgt[0] > w or tgt[1] > h) and cfg.objetivo == "pantalla":
-            msgs.append(f"Escritorio de {w}x{h} -> {tgt[0]}x{tgt[1]} es reescalado (no añade detalle). "
-                        "Para 1080p real usa superres.sh.")
+            msgs.append(f"Escritorio de {w}x{h} -> {tgt[0]}x{tgt[1]} es REESCALADO (no añade detalle). "
+                        f"Para {tgt[0]}x{tgt[1]} reales activa el supermuestreo "
+                        f"(`grabador superres {tgt[0]}x{tgt[1]}`) y graba en 'nativa'.")
     if sesion == "wayland" and resolver_motor(cfg) == "ffmpeg":
         msgs.append("En Wayland ffmpeg (x11grab) solo verá apps XWayland. Instala gpu-screen-recorder.")
     return msgs
@@ -419,13 +548,18 @@ def cmd_info(_: argparse.Namespace) -> int:
     print(f"Sesión:            {tipo_sesion()}")
     if which("xrandr"):
         w, h, x, y, hz = pantalla_x11()
-        print(f"Monitor:           {w}x{h}+{x}+{y} @ {hz:.2f} Hz")
+        i = salida_principal() or {}
+        print(f"Escritorio:        {w}x{h}+{x}+{y} @ {hz:.2f} Hz")
+        if i:
+            print(f"Panel nativo:      {i['nativa'][0]}x{i['nativa'][1]}  "
+                  f"(supermuestreo {'ACTIVO x' + str(factor_escala()) if i['supermuestreo'] else 'apagado'})")
+        print(f"nvidia-settings:   {'✔' if _nvidia_settings_ok() else '✘ (se usará xrandr --scale-from)'}")
     enc = encoders_ffmpeg()
     print(f"ffmpeg encoders:   {', '.join(sorted(enc)) or '(ffmpeg no instalado)'}")
     if "h264_nvenc" in enc:
         print(f"NVENC funcional:   {'sí' if nvenc_funciona() else 'NO (revisa driver nvidia)'}")
     for t in ("gpu-screen-recorder", "xdotool", "xwininfo", "slop", "pactl", "notify-send"):
-        print(f"{t:<19}{'✔' if which(t) else '✘'}")
+        print(f"{t:<21}{'✔' if which(t) else '✘'}")
     print(f"Grabación activa:  {pid_activo() or 'no'}")
     return 0
 
@@ -438,7 +572,7 @@ def parser() -> argparse.ArgumentParser:
         sp.add_argument("-m", "--motor", choices=["auto", "ffmpeg", "gsr"], default="auto")
         sp.add_argument("-o", "--objetivo", choices=["pantalla", "ventana", "region", "enfocada"],
                         default="pantalla")
-        sp.add_argument("-r", "--resolucion", choices=list(RESOLUCIONES), default="1080p")
+        sp.add_argument("-r", "--resolucion", choices=list(RESOLUCIONES), default="nativa")
         sp.add_argument("-f", "--fps", type=int, default=60)
         sp.add_argument("-c", "--codec", choices=["h264", "hevc"], default="h264")
         sp.add_argument("-q", "--calidad", choices=list(CALIDADES), default="alta")
@@ -455,6 +589,11 @@ def parser() -> argparse.ArgumentParser:
     opts(sub.add_parser("grabar", help="grabar desde la terminal"))
     opts(sub.add_parser("alternar", help="inicia/detiene (para atajo de teclado)"))
     sub.add_parser("detener", help="detiene la grabación activa")
+    sp = sub.add_parser("superres", help="dibuja el escritorio a más resolución (1080p real)")
+    sp.add_argument("modo", help="WxH (p.ej. 1920x1080) u 'off'")
+    sp = sub.add_parser("navegador", help="abre Chrome/Firefox con la escala correcta")
+    sp.add_argument("nav", nargs="?", default="auto", choices=["auto", "chrome", "chromium", "firefox"])
+    sp.add_argument("url", nargs="?")
     sub.add_parser("info", help="diagnóstico del sistema")
     sub.add_parser("gui", help="interfaz gráfica (por defecto)")
     return p
@@ -469,6 +608,14 @@ def main() -> int:
     if a.accion == "detener":
         ok = detener()
         print("Detenida." if ok else "No había grabación activa.")
+        return 0
+    if a.accion == "superres":
+        print(superres(a.modo))
+        if a.modo != "off":
+            print(f"Volver a la normalidad: {APP} superres off")
+        return 0
+    if a.accion == "navegador":
+        print(lanzar_navegador(a.nav, a.url))
         return 0
     if a.accion == "info":
         return cmd_info(a)
