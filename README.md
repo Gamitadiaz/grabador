@@ -12,7 +12,26 @@ Graba **pantalla completa, una ventana, una región o la ventana enfocada**, a
 
 Recomendado (AUR): `yay -S gpu-screen-recorder` — graba ventanas **aunque estén tapadas** y funciona en Wayland.
 
-## Uso
+## Uso sin terminal
+
+Abre **Grabador** desde el menú de aplicaciones. Elige qué grabar, resolución y fps, y pulsa **● Grabar**.
+Tu configuración se recuerda (`~/.config/grabador/config.json`). Lo técnico está en **▸ Avanzado**.
+
+**Al grabar** la ventana se oculta y queda un indicador:
+
+| Opción | Qué hace | Cuándo |
+|---|---|---|
+| `auto` | pantalla completa → bandeja; ventana/región → mini barra | recomendado |
+| `mini barra` | ventanita flotante `● 00:42 ■`, arrastrable, siempre encima | grabar una ventana o región |
+| `bandeja` | icono junto al reloj; clic = detener (requiere `yad`) | pantalla completa / juegos |
+| `minimizar` | solo minimiza la ventana | si tu panel no tiene bandeja |
+
+Ojo: si grabas **pantalla completa** con la mini barra, la barra sale en el video. Por eso `auto` usa la bandeja.
+
+**Consumo**: la interfaz usa ~25 MB de RAM y ~0 % CPU (se actualiza 1 vez por segundo). Lo que consume es
+codificar el video, y eso lo hace la GPU (NVENC/VAAPI).
+
+## Uso desde terminal
 
 ```bash
 grabador                                   # interfaz gráfica

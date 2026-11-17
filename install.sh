@@ -3,7 +3,7 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 if command -v pacman >/dev/null; then
-  PKGS=(ffmpeg tk xdotool xorg-xwininfo xorg-xrandr slop libpulse libnotify libva-utils)
+  PKGS=(ffmpeg tk xdotool xorg-xwininfo xorg-xrandr slop libpulse libnotify libva-utils yad xdg-utils)
   GPUS=$(lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' || true)
   echo "$GPUS"
   grep -qi nvidia <<<"$GPUS" && PKGS+=(nvidia-settings)
