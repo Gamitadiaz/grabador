@@ -73,6 +73,41 @@ def encoders_ffmpeg() -> set[str]:
             if re.search(rf"\s{e}\s", out)}
 
 
+def dispositivo_vaapi() -> str | None:
+    devs = sorted(Path("/dev/dri").glob("renderD*")) if Path("/dev/dri").exists() else []
+    return str(devs[0]) if devs else None
+
+
+def vaapi_funciona(codec: str = "h264_vaapi") -> bool:
+    """Intel (iGPU) y AMD codifican por hardware con VAAPI. Prueba real con ffmpeg."""
+    dev = dispositivo_vaapi()
+    if not dev:
+        return False
+    r = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-vaapi_device", dev, "-f", "lavfi",
+         "-i", "color=black:s=256x256:d=0.1", "-vf", "format=nv12,hwupload",
+         "-c:v", codec, "-f", "null", "-"], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+_CACHE_ENC: dict[str, str] = {}
+
+
+def elegir_encoder(codec: str, preferido: str = "auto") -> str:
+    """Devuelve 'nvenc' (NVIDIA), 'vaapi' (Intel/AMD) o 'cpu'."""
+    clave = f"{codec}:{preferido}"
+    if clave in _CACHE_ENC:
+        return _CACHE_ENC[clave]
+    enc = encoders_ffmpeg()
+    res = "cpu"
+    if preferido in ("auto", "nvenc") and f"{codec}_nvenc" in enc and nvenc_funciona(f"{codec}_nvenc"):
+        res = "nvenc"
+    elif preferido in ("auto", "vaapi") and vaapi_funciona(f"{codec}_vaapi"):
+        res = "vaapi"
+    _CACHE_ENC[clave] = res
+    return res
+
+
 def nvenc_funciona(codec: str = "h264_nvenc") -> bool:
     """ffmpeg puede listar nvenc aunque el driver no lo soporte: hacemos una prueba real."""
     r = subprocess.run(
@@ -275,6 +310,7 @@ class Config:
     resolucion: str = "nativa"
     fps: int = 60
     codec: str = "h264"            # h264 | hevc
+    encoder: str = "auto"          # auto | nvenc | vaapi | cpu
     calidad: str = "alta"
     ajuste: str = "barras"         # barras (mantiene proporción) | estirar
     audio_escritorio: bool = True
@@ -327,6 +363,9 @@ def comando_ffmpeg(cfg: Config, salida: Path) -> list[str]:
         raise RuntimeError("ffmpeg necesita X11. En Wayland usa el motor gpu-screen-recorder.")
     display = os.environ.get("DISPLAY", ":0")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-stats", "-y"]
+    hw = elegir_encoder(cfg.codec, cfg.encoder)
+    if hw == "vaapi":
+        cmd += ["-vaapi_device", dispositivo_vaapi()]
 
     grab = ["-f", "x11grab", "-thread_queue_size", "1024", "-framerate", str(cfg.fps),
             "-draw_mouse", "1" if cfg.cursor else "0"]
@@ -369,7 +408,7 @@ def comando_ffmpeg(cfg: Config, salida: Path) -> list[str]:
             vf.append(f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black")
     else:
         vf.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
-    vf.append("format=yuv420p")
+    vf.append("format=nv12,hwupload" if hw == "vaapi" else "format=yuv420p")
     fc = f"[0:v]{','.join(vf)}[v]"
     maps = ["-map", "[v]"]
     if n_audio == 2:
@@ -381,16 +420,17 @@ def comando_ffmpeg(cfg: Config, salida: Path) -> list[str]:
 
     # --- encoder
     cq, crf, _ = CALIDADES[cfg.calidad]
-    enc = encoders_ffmpeg()
-    nv = f"{cfg.codec}_nvenc"
-    if nv in enc and nvenc_funciona(nv):
-        cmd += ["-c:v", nv, "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", str(cq),
+    if hw == "nvenc":
+        cmd += ["-c:v", f"{cfg.codec}_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", str(cq),
                 "-b:v", "0", "-g", str(cfg.fps * 2), "-bf", "0"]
-        if cfg.codec == "hevc":
-            cmd += ["-tag:v", "hvc1"]
+    elif hw == "vaapi":
+        cmd += ["-c:v", f"{cfg.codec}_vaapi", "-rc_mode", "CQP", "-qp", str(cq),
+                "-g", str(cfg.fps * 2), "-bf", "0"]
     else:
         sw = "libx265" if cfg.codec == "hevc" else "libx264"
         cmd += ["-c:v", sw, "-preset", "veryfast", "-crf", str(crf), "-g", str(cfg.fps * 2)]
+    if cfg.codec == "hevc":
+        cmd += ["-tag:v", "hvc1"]
     if n_audio:
         cmd += ["-c:a", "aac", "-b:a", "192k"]
     if cfg.contenedor == "mp4":
@@ -493,7 +533,7 @@ def notificar(msg: str) -> None:
 # ----------------------------------------------------------------------------- CLI
 def cfg_desde_args(a: argparse.Namespace) -> Config:
     cfg = Config(motor=a.motor, objetivo=a.objetivo, resolucion=a.resolucion, fps=a.fps,
-                 codec=a.codec, calidad=a.calidad, ajuste=a.ajuste,
+                 codec=a.codec, encoder=a.encoder, calidad=a.calidad, ajuste=a.ajuste,
                  audio_escritorio=not a.sin_audio, microfono=a.mic, cursor=not a.sin_cursor,
                  contenedor=a.contenedor, carpeta=a.carpeta, ventana_id=a.ventana)
     if cfg.objetivo == "ventana" and not cfg.ventana_id and \
@@ -557,7 +597,9 @@ def cmd_info(_: argparse.Namespace) -> int:
     enc = encoders_ffmpeg()
     print(f"ffmpeg encoders:   {', '.join(sorted(enc)) or '(ffmpeg no instalado)'}")
     if "h264_nvenc" in enc:
-        print(f"NVENC funcional:   {'sí' if nvenc_funciona() else 'NO (revisa driver nvidia)'}")
+        print(f"NVENC (NVIDIA):    {'sí' if nvenc_funciona() else 'no'}")
+    print(f"VAAPI (Intel/AMD): {'sí  ' + str(dispositivo_vaapi()) if vaapi_funciona() else 'no'}")
+    print(f"Encoder elegido:   {elegir_encoder('h264')}")
     for t in ("gpu-screen-recorder", "xdotool", "xwininfo", "slop", "pactl", "notify-send"):
         print(f"{t:<21}{'✔' if which(t) else '✘'}")
     print(f"Grabación activa:  {pid_activo() or 'no'}")
@@ -575,6 +617,8 @@ def parser() -> argparse.ArgumentParser:
         sp.add_argument("-r", "--resolucion", choices=list(RESOLUCIONES), default="nativa")
         sp.add_argument("-f", "--fps", type=int, default=60)
         sp.add_argument("-c", "--codec", choices=["h264", "hevc"], default="h264")
+        sp.add_argument("-e", "--encoder", choices=["auto", "nvenc", "vaapi", "cpu"], default="auto",
+                        help="auto: NVIDIA > Intel/AMD (VAAPI) > CPU")
         sp.add_argument("-q", "--calidad", choices=list(CALIDADES), default="alta")
         sp.add_argument("--ajuste", choices=["barras", "estirar"], default="barras")
         sp.add_argument("--contenedor", choices=["mkv", "mp4"], default="mkv")

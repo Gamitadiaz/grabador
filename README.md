@@ -29,6 +29,19 @@ Los videos van a `~/Videos/Grabador/` (en `.mkv` por defecto: si se corta la luz
 `--contenedor mp4` si lo prefieres). Para pasar mkv a mp4 sin recodificar:
 `ffmpeg -i in.mkv -c copy out.mp4`.
 
+## Gráficas compatibles
+
+No necesitas NVIDIA. El encoder se elige solo (`grabador info` muestra cuál):
+
+| Gráfica | Codificación | Supermuestreo (1080p real) |
+|---|---|---|
+| NVIDIA | NVENC | `nvidia-settings` ViewPortIn |
+| Intel integrada / AMD | VAAPI (hardware) | `xrandr --scale-from` |
+| Cualquier otra | CPU (libx264) | `xrandr --scale-from` |
+
+Forzar uno: `grabador grabar -e vaapi` / `-e nvenc` / `-e cpu`. Si VAAPI sale "no" en Intel viejo
+(antes de Broadwell, ~2014): `sudo pacman -S libva-intel-driver`. Verifica con `vainfo`.
+
 ## Motores
 
 | | ffmpeg (x11grab + NVENC) | gpu-screen-recorder |

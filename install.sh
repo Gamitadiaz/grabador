@@ -3,7 +3,13 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 if command -v pacman >/dev/null; then
-  sudo pacman -S --needed ffmpeg tk xdotool xorg-xwininfo xorg-xrandr slop libpulse libnotify nvidia-settings
+  PKGS=(ffmpeg tk xdotool xorg-xwininfo xorg-xrandr slop libpulse libnotify libva-utils)
+  GPUS=$(lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' || true)
+  echo "$GPUS"
+  grep -qi nvidia <<<"$GPUS" && PKGS+=(nvidia-settings)
+  grep -qi intel  <<<"$GPUS" && PKGS+=(intel-media-driver)   # VAAPI Intel (Broadwell o más nuevo)
+  grep -Eqi 'amd|ati|radeon' <<<"$GPUS" && PKGS+=(mesa)      # VAAPI AMD (incluido en mesa)
+  sudo pacman -S --needed "${PKGS[@]}"
   echo "Opcional (recomendado): gpu-screen-recorder desde AUR ->  yay -S gpu-screen-recorder"
 fi
 chmod +x "$DIR/grabador.py" "$DIR/superres.sh"

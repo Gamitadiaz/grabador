@@ -171,8 +171,8 @@ class App(tk.Tk):
         if g.which("xrandr"):
             w, h, _, _, hz = g.pantalla_x11()
             txt.append(f"Escritorio: {w}x{h} @ {hz:.0f} Hz")
-        enc = g.encoders_ffmpeg()
-        txt.append("NVENC: " + ("sí" if "h264_nvenc" in enc else "no (usará CPU)"))
+        txt.append("Encoder: " + {"nvenc": "NVIDIA NVENC", "vaapi": "Intel/AMD VAAPI",
+                                  "cpu": "CPU (x264)"}[g.elegir_encoder("h264")])
         txt.append("gpu-screen-recorder: " + ("sí" if g.which("gpu-screen-recorder") else "no"))
         txt.append("Atajo global: bindea `grabador.py alternar` en tu WM/DE.")
         self.lbl_info.config(text="  ·  ".join(txt[:-1]) + "\n" + txt[-1])
